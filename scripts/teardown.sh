@@ -14,6 +14,9 @@ AWS_PROFILE="${AWS_PROFILE:-dev}"
 REGION="${REGION:-us-west-2}"
 NS=aws-lab
 TAG_KEY=crossplane-lab          # every MR is tagged with this for verification
+XR_NAME="${XR_NAME:-lab-site}"  # Phase 4 names IAM/OAC resources <xr-name>-*, NOT
+                                # crossplane-lab-*. Both schemes must be checked or
+                                # the verification silently misses orphans.
 
 if [ "${1:-}" != "--yes" ]; then
   read -r -p "Delete ALL lab resources in ${REGION} (profile ${AWS_PROFILE})? [y/N] " a
@@ -84,16 +87,18 @@ check "EC2 instances (tag:$TAG_KEY, non-terminated)" "$("${A[@]}" ec2 describe-i
   --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)"
 check "Security groups (tag:$TAG_KEY)" "$("${A[@]}" ec2 describe-security-groups \
   --filters "Name=tag-key,Values=$TAG_KEY" --query 'length(SecurityGroups)' --output text 2>/dev/null || echo 0)"
-check "IAM roles (crossplane-lab-*)" "$("${A[@]}" iam list-roles \
-  --query 'length(Roles[?starts_with(RoleName, `crossplane-lab-`)])' --output text 2>/dev/null || echo 0)"
-check "Instance profiles (crossplane-lab-*)" "$("${A[@]}" iam list-instance-profiles \
-  --query 'length(InstanceProfiles[?starts_with(InstanceProfileName, `crossplane-lab-`)])' --output text 2>/dev/null || echo 0)"
+check "IAM roles (crossplane-lab-* | ${XR_NAME}-*)" "$(aws --profile "$AWS_PROFILE" iam list-roles \
+  --query "length(Roles[?starts_with(RoleName, 'crossplane-lab-') || starts_with(RoleName, '${XR_NAME}-')])" --output text 2>/dev/null || echo 0)"
+check "Instance profiles (crossplane-lab-* | ${XR_NAME}-*)" "$(aws --profile "$AWS_PROFILE" iam list-instance-profiles \
+  --query "length(InstanceProfiles[?starts_with(InstanceProfileName, 'crossplane-lab-') || starts_with(InstanceProfileName, '${XR_NAME}-')])" --output text 2>/dev/null || echo 0)"
 check "S3 buckets (crossplane-lab-*)" "$("${A[@]}" s3api list-buckets \
   --query 'length(Buckets[?starts_with(Name, `crossplane-lab-`)])' --output text 2>/dev/null || echo 0)"
+# NOTE: CloudFront returns null (not []) when there are no items, and length()
+# errors on null. The `|| `[]`` fallback keeps the query valid when empty.
 check "CloudFront distributions (lab comment)" "$("${A[@]}" cloudfront list-distributions \
-  --query 'length(DistributionList.Items[?Comment==`crossplane-lab`])' --output text 2>/dev/null || echo 0)"
-check "OACs (crossplane-lab-*)" "$("${A[@]}" cloudfront list-origin-access-controls \
-  --query 'length(OriginAccessControlList.Items[?starts_with(Name, `crossplane-lab-`)])' --output text 2>/dev/null || echo 0)"
+  --query 'length(DistributionList.Items[?Comment==`crossplane-lab`] || `[]`)' --output text 2>/dev/null || echo 0)"
+check "OACs (crossplane-lab-* | ${XR_NAME}-*)" "$(aws --profile "$AWS_PROFILE" cloudfront list-origin-access-controls \
+  --query "length(OriginAccessControlList.Items[?starts_with(Name, 'crossplane-lab-') || starts_with(Name, '${XR_NAME}-')] || \`[]\`)" --output text 2>/dev/null || echo 0)"
 
 echo "==============================================================="
 if [ "$fail" -eq 0 ] && [ "$remaining" -eq 0 ]; then

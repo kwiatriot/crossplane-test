@@ -1,0 +1,74 @@
+# XRD for XStaticSite -- a namespaced composite resource (v2 scope: Namespaced).
+#
+# In v2 an XR can be namespaced directly, so there is no Claim indirection: you
+# create an XStaticSite in `aws-lab` and that IS the user-facing object. In v1 you
+# would have needed a cluster-scoped XR plus a namespaced Claim to get the same
+# ergonomics. `claimNames` is deliberately omitted.
+#
+# The whole point of this file is the size difference: four fields here replace
+# ~19 managed resources and ~450 lines of raw YAML in phase2-raw-mrs/.
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: xstaticsites.lab.example.org
+spec:
+  scope: Namespaced
+  group: lab.example.org
+  names:
+    kind: XStaticSite
+    plural: xstaticsites
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                region:
+                  type: string
+                  default: us-west-2
+                  description: AWS region for all regional resources.
+                vpcCidr:
+                  type: string
+                  default: 10.42.0.0/16
+                  description: CIDR for the VPC. Subnets are carved from it by convention.
+                instanceType:
+                  type: string
+                  default: t3.micro
+                  description: EC2 instance type. Must match the AMI's architecture.
+                enableInstance:
+                  type: boolean
+                  default: true
+                  description: >-
+                    Whether to create the EC2 instance, its IAM role and instance
+                    profile. Set false to get just the network plus the
+                    S3/CloudFront site.
+              required:
+                - region
+            status:
+              type: object
+              properties:
+                # Surfaced so `kubectl get xstaticsite` shows the URL without
+                # digging through composed MRs.
+                cloudfrontDomain:
+                  type: string
+                  description: The *.cloudfront.net domain serving the site.
+                bucketName:
+                  type: string
+                instanceId:
+                  type: string
+                vpcId:
+                  type: string
+      additionalPrinterColumns:
+        - name: DOMAIN
+          type: string
+          jsonPath: .status.cloudfrontDomain
+        - name: INSTANCE
+          type: string
+          jsonPath: .status.instanceId
+        # Crossplane already adds SYNCED/READY columns for XRs -- declaring them
+        # here duplicates them in `kubectl get` output.

@@ -1,0 +1,468 @@
+# Composition for XStaticSite, using a FUNCTION PIPELINE (not deprecated
+# inline patch-and-transform).
+#
+# SHAPE OF THE PIPELINE, and why:
+#   step 1  render      -- function-go-templating emits every managed resource.
+#   step 2  auto-ready  -- derives the XR's Ready condition from the readiness of
+#                          all composed resources. Without it the XR reports Ready
+#                          the instant it is created, long before AWS has caught
+#                          up, which makes `kubectl wait` useless.
+#
+# Steps run in order and each receives the previous step's desired state, so this
+# is a transform chain, not a set of independent patches. That is the substantive
+# difference from patch-and-transform: P&T could only map fields from the XR onto
+# a fixed list of resources, so anything conditional (enableInstance) or computed
+# (subnet CIDRs) was impossible without contortions. Here the resource LIST itself
+# is computed.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xstaticsite-aws
+spec:
+  compositeTypeRef:
+    apiVersion: lab.example.org/v1alpha1
+    kind: XStaticSite
+  mode: Pipeline
+  pipeline:
+    - step: render
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $xr := .observed.composite.resource -}}
+            {{- $ns := $xr.metadata.namespace -}}
+            {{- $name := $xr.metadata.name -}}
+            {{- $region := $xr.spec.region -}}
+            {{- $cidr := $xr.spec.vpcCidr -}}
+            {{- $enableInstance := $xr.spec.enableInstance -}}
+            {{- /* Account ID is hardcoded: it is needed for the OAC bucket policy
+                   condition and there is no way to discover it from within a
+                   composition (no data sources). */ -}}
+            {{- $account := "022334369124" -}}
+            {{- /* AL2023 x86_64 us-west-2, published 2026-08-31. GOES STALE --
+                   see phase2-raw-mrs/03-instance.yaml for the lookup command. */ -}}
+            {{- $ami := "ami-0bea529386a62a2ad" -}}
+            {{- $bucket := printf "crossplane-lab-%s-%s" $account $name -}}
+            {{- /* Subnet CIDRs are DERIVED from the VPC CIDR's second octet
+                   rather than hardcoded. This is the kind of computation
+                   patch-and-transform could not express. */ -}}
+            {{- $oct := index (splitList "." $cidr) 1 }}
+
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: VPC
+            metadata:
+              name: {{ $name }}-vpc
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: vpc
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                cidrBlock: {{ $cidr }}
+                enableDnsSupport: true
+                enableDnsHostnames: true
+                tags:
+                  Name: {{ $name }}-vpc
+                  crossplane-lab: "true"
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: InternetGateway
+            metadata:
+              name: {{ $name }}-igw
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: igw
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                vpcIdRef:
+                  name: {{ $name }}-vpc
+                tags:
+                  Name: {{ $name }}-igw
+                  crossplane-lab: "true"
+            {{- /* Two public + two private subnets, generated in a loop. */ -}}
+            {{- range $i, $az := list "a" "b" }}
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: Subnet
+            metadata:
+              name: {{ $name }}-public-{{ $az }}
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: subnet-public-{{ $az }}
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                availabilityZone: {{ $region }}{{ $az }}
+                cidrBlock: 10.{{ $oct }}.{{ $i }}.0/24
+                mapPublicIpOnLaunch: true
+                vpcIdRef:
+                  name: {{ $name }}-vpc
+                tags:
+                  Name: {{ $name }}-public-{{ $az }}
+                  crossplane-lab: "true"
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: Subnet
+            metadata:
+              name: {{ $name }}-private-{{ $az }}
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: subnet-private-{{ $az }}
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                availabilityZone: {{ $region }}{{ $az }}
+                cidrBlock: 10.{{ $oct }}.{{ add $i 10 }}.0/24
+                vpcIdRef:
+                  name: {{ $name }}-vpc
+                tags:
+                  Name: {{ $name }}-private-{{ $az }}
+                  crossplane-lab: "true"
+            {{- end }}
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: RouteTable
+            metadata:
+              name: {{ $name }}-public-rt
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: rt-public
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                vpcIdRef:
+                  name: {{ $name }}-vpc
+                tags:
+                  Name: {{ $name }}-public-rt
+                  crossplane-lab: "true"
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: Route
+            metadata:
+              name: {{ $name }}-route-default
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: route-default
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                destinationCidrBlock: 0.0.0.0/0
+                routeTableIdRef:
+                  name: {{ $name }}-public-rt
+                gatewayIdRef:
+                  name: {{ $name }}-igw
+            {{- range $i, $az := list "a" "b" }}
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: RouteTableAssociation
+            metadata:
+              name: {{ $name }}-rta-{{ $az }}
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: rta-{{ $az }}
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                routeTableIdRef:
+                  name: {{ $name }}-public-rt
+                subnetIdRef:
+                  name: {{ $name }}-public-{{ $az }}
+            {{- end }}
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: SecurityGroup
+            metadata:
+              name: {{ $name }}-sg
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: sg
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                name: {{ $name }}-sg
+                description: "Crossplane lab - no inbound, egress 443 only for SSM"
+                vpcIdRef:
+                  name: {{ $name }}-vpc
+                tags:
+                  Name: {{ $name }}-sg
+                  crossplane-lab: "true"
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: SecurityGroupEgressRule
+            metadata:
+              name: {{ $name }}-sg-egress
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: sg-egress
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                description: "HTTPS out for SSM agent"
+                ipProtocol: tcp
+                fromPort: 443
+                toPort: 443
+                cidrIpv4: 0.0.0.0/0
+                securityGroupIdRef:
+                  name: {{ $name }}-sg
+            {{- /* ---- conditional compute tier ---- */ -}}
+            {{- if $enableInstance }}
+            ---
+            apiVersion: iam.aws.m.upbound.io/v1beta1
+            kind: Role
+            metadata:
+              name: {{ $name }}-ssm-role
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: ssm-role
+                crossplane.io/external-name: {{ $name }}-ssm-role
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                assumeRolePolicy: |
+                  {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                tags:
+                  crossplane-lab: "true"
+            ---
+            apiVersion: iam.aws.m.upbound.io/v1beta1
+            kind: RolePolicyAttachment
+            metadata:
+              name: {{ $name }}-ssm-policy
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: ssm-policy
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                policyArn: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+                roleRef:
+                  name: {{ $name }}-ssm-role
+            ---
+            apiVersion: iam.aws.m.upbound.io/v1beta1
+            kind: InstanceProfile
+            metadata:
+              name: {{ $name }}-instance-profile
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: instance-profile
+                crossplane.io/external-name: {{ $name }}-instance-profile
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                roleRef:
+                  name: {{ $name }}-ssm-role
+                tags:
+                  crossplane-lab: "true"
+            ---
+            apiVersion: ec2.aws.m.upbound.io/v1beta1
+            kind: Instance
+            metadata:
+              name: {{ $name }}-instance
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: instance
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                ami: {{ $ami }}
+                instanceType: {{ $xr.spec.instanceType }}
+                associatePublicIpAddress: true
+                subnetIdRef:
+                  name: {{ $name }}-public-a
+                vpcSecurityGroupIdRefs:
+                  - name: {{ $name }}-sg
+                {{- /* Still a plain string -- no ref exists. But here the
+                       Composition GENERATES both sides from $name, so the
+                       coupling is at least authored in one place. */}}
+                iamInstanceProfile: {{ $name }}-instance-profile
+                tags:
+                  Name: {{ $name }}-instance
+                  crossplane-lab: "true"
+            {{- end }}
+            {{- /* ---- static site tier ---- */}}
+            ---
+            apiVersion: s3.aws.m.upbound.io/v1beta1
+            kind: Bucket
+            metadata:
+              name: {{ $name }}-bucket
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: bucket
+                crossplane.io/external-name: {{ $bucket }}
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                forceDestroy: true
+                tags:
+                  crossplane-lab: "true"
+            ---
+            apiVersion: s3.aws.m.upbound.io/v1beta1
+            kind: BucketPublicAccessBlock
+            metadata:
+              name: {{ $name }}-bucket-pab
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: bucket-pab
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                bucketRef:
+                  name: {{ $name }}-bucket
+                blockPublicAcls: true
+                blockPublicPolicy: false
+                ignorePublicAcls: true
+                restrictPublicBuckets: false
+            ---
+            apiVersion: s3.aws.m.upbound.io/v1beta1
+            kind: BucketOwnershipControls
+            metadata:
+              name: {{ $name }}-bucket-ownership
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: bucket-ownership
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                bucketRef:
+                  name: {{ $name }}-bucket
+                rule:
+                  objectOwnership: BucketOwnerEnforced
+            ---
+            apiVersion: cloudfront.aws.m.upbound.io/v1beta1
+            kind: OriginAccessControl
+            metadata:
+              name: {{ $name }}-oac
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: oac
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                name: {{ $name }}-oac
+                description: "Crossplane lab OAC for S3 origin"
+                originAccessControlOriginType: s3
+                signingBehavior: always
+                signingProtocol: sigv4
+            ---
+            apiVersion: s3.aws.m.upbound.io/v1beta1
+            kind: BucketPolicy
+            metadata:
+              name: {{ $name }}-bucket-policy
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: bucket-policy
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                bucketRef:
+                  name: {{ $name }}-bucket
+                {{- /* Same AWS:SourceAccount trick as Phase 2 to break the
+                       CloudFront<->S3 cycle. The difference: the bucket name and
+                       account are template variables, so the policy string is
+                       generated rather than hand-maintained. */}}
+                policy: |
+                  {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                      "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+                      "Effect": "Allow",
+                      "Principal": {"Service": "cloudfront.amazonaws.com"},
+                      "Action": "s3:GetObject",
+                      "Resource": "arn:aws:s3:::{{ $bucket }}/*",
+                      "Condition": {"StringEquals": {"AWS:SourceAccount": "{{ $account }}"}}
+                    }]
+                  }
+            ---
+            apiVersion: s3.aws.m.upbound.io/v1beta1
+            kind: Object
+            metadata:
+              name: {{ $name }}-index-html
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: index-html
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                region: {{ $region }}
+                bucketRef:
+                  name: {{ $name }}-bucket
+                key: index.html
+                contentType: text/html
+                content: |
+                  <!doctype html>
+                  <html><head><title>{{ $name }}</title></head>
+                  <body style="font-family:system-ui;padding:3rem">
+                    <h1>Served from S3 via CloudFront OAC</h1>
+                    <p>Composed by a single XStaticSite XR named <code>{{ $name }}</code>.</p>
+                  </body></html>
+            ---
+            apiVersion: cloudfront.aws.m.upbound.io/v1beta1
+            kind: Distribution
+            metadata:
+              name: {{ $name }}-distribution
+              namespace: {{ $ns }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: distribution
+            spec:
+              providerConfigRef: {kind: ProviderConfig, name: default}
+              forProvider:
+                enabled: true
+                comment: crossplane-lab
+                defaultRootObject: index.html
+                priceClass: PriceClass_100
+                origin:
+                  - originId: s3-origin
+                    domainName: {{ $bucket }}.s3.{{ $region }}.amazonaws.com
+                    originAccessControlIdRef:
+                      name: {{ $name }}-oac
+                    s3OriginConfig: {}
+                defaultCacheBehavior:
+                  targetOriginId: s3-origin
+                  viewerProtocolPolicy: redirect-to-https
+                  allowedMethods: [GET, HEAD]
+                  cachedMethods: [GET, HEAD]
+                  compress: true
+                  cachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+                restrictions:
+                  geoRestriction:
+                    restrictionType: none
+                viewerCertificate:
+                  cloudfrontDefaultCertificate: true
+                tags:
+                  crossplane-lab: "true"
+            {{- /* ---- surface status back onto the XR ----
+                   Emitting the composite itself is how function-go-templating
+                   writes XR status. Guarded with `dig` so the first render (when
+                   nothing is observed yet) does not fail. */}}
+            ---
+            apiVersion: lab.example.org/v1alpha1
+            kind: XStaticSite
+            status:
+              bucketName: {{ $bucket }}
+              vpcId: {{ dig "resources" "vpc" "resource" "status" "atProvider" "id" "" .observed | quote }}
+              cloudfrontDomain: {{ dig "resources" "distribution" "resource" "status" "atProvider" "domainName" "" .observed | quote }}
+              {{- if $enableInstance }}
+              instanceId: {{ dig "resources" "instance" "resource" "status" "atProvider" "id" "" .observed | quote }}
+              {{- end }}
+    - step: auto-ready
+      functionRef:
+        name: function-auto-ready

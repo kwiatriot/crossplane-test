@@ -159,8 +159,10 @@ spec:
         # This one IS referenceable.
         originAccessControlIdRef:
           name: lab-oac
-        s3OriginConfig:
-          originAccessIdentity: ""
+        # Empty map, not {originAccessIdentity: ""}. OAC supersedes the legacy
+        # Origin Access Identity, and the provider drops the empty string --
+        # declaring it here would show up forever in scripts/drift-check.sh.
+        s3OriginConfig: {}
     defaultCacheBehavior:
       targetOriginId: s3-lab-bucket
       viewerProtocolPolicy: redirect-to-https

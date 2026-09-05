@@ -1,0 +1,12 @@
+# The entire stack, as the user sees it. Four fields replace ~450 lines of raw
+# managed resources across phase2-raw-mrs/.
+apiVersion: lab.example.org/v1alpha1
+kind: XStaticSite
+metadata:
+  name: lab-site
+  namespace: aws-lab
+spec:
+  region: us-west-2
+  vpcCidr: 10.42.0.0/16
+  instanceType: t3.micro
+  enableInstance: true

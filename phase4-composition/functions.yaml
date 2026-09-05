@@ -1,0 +1,26 @@
+# Composition functions for the Phase 4 pipeline.
+#
+# WHY function-go-templating OVER function-kcl:
+#   Go templating is the same mental model as Helm, so the syntax transfers
+#   directly and there is no new language to learn for a one-off lab. The honest
+#   tradeoff: templating YAML as *text* is indentation-sensitive and has no type
+#   checking, so a mistake surfaces as a YAML parse error at render time rather
+#   than a compile error. At ~19 resources that is tolerable. Past roughly this
+#   size -- or anywhere the logic gets genuinely conditional -- function-kcl's
+#   typed, schema-aware model is the better tool, because it validates structure
+#   before it ever reaches the API server.
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-go-templating
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.4
+---
+# Derives the XR's Ready condition from the readiness of every composed resource.
+# Without it the XR reports Ready immediately, before AWS has finished.
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-auto-ready
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-auto-ready:v0.7.0
