@@ -1,0 +1,44 @@
+# Crossplane core 2.4.0 Helm values
+#
+# args: --enable-custom-to-managed-resource-conversion is a BETA feature. Upbound
+# packages ship plain CRDs; this converts them to ManagedResourceDefinitions on
+# install, which default to state: Inactive. Without it, every CRD in every
+# package is installed unconditionally (337 of them for our four providers).
+args:
+  - --enable-custom-to-managed-resource-conversion
+
+provider:
+  # Feeds `crossplane core init --activation <name>`, which creates the default
+  # ManagedResourceActivationPolicy. The chart default is ["*"] (activate all),
+  # which would defeat the point of the flag above.
+  #
+  # 19 MRDs instead of 337 CRDs. Names are <plural>.<group>, verified by reading
+  # the CRDs out of the v2.7.1 package images.
+  defaultActivations:
+    # --- ec2 ---
+    - vpcs.ec2.aws.m.upbound.io
+    - subnets.ec2.aws.m.upbound.io
+    - internetgateways.ec2.aws.m.upbound.io
+    - routetables.ec2.aws.m.upbound.io
+    - routes.ec2.aws.m.upbound.io
+    - routetableassociations.ec2.aws.m.upbound.io
+    - securitygroups.ec2.aws.m.upbound.io
+    - securitygroupegressrules.ec2.aws.m.upbound.io
+    - instances.ec2.aws.m.upbound.io
+    # --- s3 ---
+    - buckets.s3.aws.m.upbound.io
+    - bucketpolicies.s3.aws.m.upbound.io
+    - bucketpublicaccessblocks.s3.aws.m.upbound.io
+    - bucketownershipcontrols.s3.aws.m.upbound.io
+    - objects.s3.aws.m.upbound.io
+    # --- cloudfront ---
+    - distributions.cloudfront.aws.m.upbound.io
+    - originaccesscontrols.cloudfront.aws.m.upbound.io
+    # --- iam ---
+    - roles.iam.aws.m.upbound.io
+    - instanceprofiles.iam.aws.m.upbound.io
+    - rolepolicyattachments.iam.aws.m.upbound.io
+
+  # Providers are installed as separate Provider manifests (bootstrap/providers.yaml)
+  # rather than here, so we can pin and re-apply them independently of the release.
+  packages: []

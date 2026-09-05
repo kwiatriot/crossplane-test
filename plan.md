@@ -7,7 +7,8 @@
 I'm a platform engineer evaluating Crossplane as a possible replacement for OpenTofu for AWS
 resource management. This is a personal learning project, not production. I have:
 
-- A homelab Kubernetes cluster (Crossplane will run here as the control plane)
+- A homelab Kubernetes cluster (Crossplane will run here as the control plane). 
+- kubectl context is cluster1
 - A personal AWS multi-account setup; **for this build everything lives in a single account**
 - A brand-new IAM user + access key created specifically for Crossplane (I'll supply the creds)
 
@@ -16,11 +17,11 @@ OpenTofu's plan/apply model — not to ship a website. Optimize for me learning 
 
 ## Target state
 
-Three things provisioned in AWS **entirely through Crossplane**, in `us-east-1`:
+Three things provisioned in AWS **entirely through Crossplane**, in `us-west-2`:
 
 1. A VPC (`10.42.0.0/16`) with public and private subnets across two AZs, an internet gateway,
    and route tables. **No NAT gateway** — cost matters here.
-2. A `t3.micro` (or `t4g.micro`) EC2 instance running Amazon Linux 2023, in a **public** subnet
+2. A `t3.micro` EC2 instance running Amazon Linux 2023, in a **public** subnet
    with a public IP, an instance profile granting `AmazonSSMManagedInstanceCore`, and a security
    group with **no inbound rules**. Access is via SSM Session Manager only. Public subnet is a
    deliberate cost choice: SSM in a private subnet would require three interface VPC endpoints.
@@ -89,7 +90,7 @@ Only after Phase 3. Collapse the whole thing into a single namespaced XR — som
 
 ```yaml
 spec:
-  region: us-east-1
+  region: us-west-2
   vpcCidr: 10.42.0.0/16
   instanceType: t3.micro
   enableInstance: true
@@ -105,7 +106,7 @@ Then delete the raw MRs and recreate everything from the XR, to prove the abstra
 ## Known gotchas — handle these explicitly
 
 - **No data sources.** Crossplane has no `data "aws_ami"` equivalent. The AL2023 AMI ID must be
-  hardcoded. Look up the current one for `us-east-1`, put it in a clearly-marked variable, and add
+  hardcoded. Look up the current one for `us-west-2`, put it in a clearly-marked variable, and add
   a comment that it goes stale.
 - **CloudFront ↔ S3 circular dependency.** The bucket policy for OAC normally scopes to the
   distribution ARN, which doesn't exist until the distribution is created — and Crossplane can't

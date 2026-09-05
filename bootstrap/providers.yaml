@@ -1,0 +1,34 @@
+# Upbound AWS family providers, pinned to v2.7.1 (verified current 2026-09-05).
+#
+# We install only the four service providers we need. Each declares a dependency
+# on provider-family-aws, which Crossplane resolves and installs automatically --
+# that family provider is what owns the ProviderConfig / ClusterProviderConfig
+# CRDs. Do NOT install the monolithic provider-aws.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-ec2
+spec:
+  package: xpkg.upbound.io/upbound/provider-aws-ec2:v2.7.1
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-s3
+spec:
+  package: xpkg.upbound.io/upbound/provider-aws-s3:v2.7.1
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-cloudfront
+spec:
+  package: xpkg.upbound.io/upbound/provider-aws-cloudfront:v2.7.1
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-iam
+spec:
+  package: xpkg.upbound.io/upbound/provider-aws-iam:v2.7.1
