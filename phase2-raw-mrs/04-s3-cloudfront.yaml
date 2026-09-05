@@ -1,0 +1,179 @@
+# Phase 2 -- private S3 bucket behind CloudFront via Origin Access Control.
+#
+# GOTCHA: THE CLOUDFRONT <-> S3 CIRCULAR DEPENDENCY.
+#
+# The textbook OAC bucket policy scopes access with AWS:SourceArn set to the
+# distribution ARN. That ARN does not exist until the distribution is created --
+# but the distribution wants a working origin. In OpenTofu you break this with
+# interpolation inside the policy document, because the graph is resolved before
+# anything is applied.
+#
+# Crossplane CANNOT do that. `policy` is an opaque JSON string; there is no
+# mechanism to reference another MR's status field into the middle of it. There
+# is no templating layer at the raw-MR level at all.
+#
+# The fix: condition on AWS:SourceAccount instead of AWS:SourceArn. The account ID
+# is known up front, so the cycle disappears.
+#
+# THE TRADEOFF, stated honestly: SourceAccount is weaker. SourceArn scopes reads to
+# ONE distribution; SourceAccount permits ANY CloudFront distribution in account
+# 022334369124 to read this bucket. In a single-account lab that is a
+# non-issue. In a real multi-tenant account it is a genuine (if narrow) widening
+# -- anyone who can create a distribution in the account can front this bucket.
+---
+# Bucket name comes from external-name (S3 Bucket has no `name` field).
+# Must be globally unique; the crossplane-lab- prefix is what teardown.sh greps.
+apiVersion: s3.aws.m.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: lab-bucket
+  namespace: aws-lab
+  annotations:
+    crossplane.io/external-name: crossplane-lab-022334369124-uw2
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    # Without this, teardown fails: S3 refuses to delete a non-empty bucket and
+    # the MR sits retrying forever after we upload index.html.
+    forceDestroy: true
+    tags:
+      crossplane-lab: "true"
+---
+apiVersion: s3.aws.m.upbound.io/v1beta1
+kind: BucketPublicAccessBlock
+metadata:
+  name: lab-bucket-pab
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    bucketRef:
+      name: lab-bucket
+    blockPublicAcls: true
+    blockPublicPolicy: false      # must stay false: the OAC policy below IS a bucket policy
+    ignorePublicAcls: true
+    restrictPublicBuckets: false
+---
+apiVersion: s3.aws.m.upbound.io/v1beta1
+kind: BucketOwnershipControls
+metadata:
+  name: lab-bucket-ownership
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    bucketRef:
+      name: lab-bucket
+    # NOTE: `rule` is an OBJECT here, not a list -- despite the CRD description
+    # saying "Configuration block(s)" and Terraform modelling it as a repeatable
+    # block. Writing it as a list fails strict decoding.
+    rule:
+      objectOwnership: BucketOwnerEnforced
+---
+apiVersion: cloudfront.aws.m.upbound.io/v1beta1
+kind: OriginAccessControl
+metadata:
+  name: lab-oac
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    name: crossplane-lab-oac
+    description: "Crossplane lab OAC for S3 origin"
+    originAccessControlOriginType: s3
+    signingBehavior: always
+    signingProtocol: sigv4
+---
+apiVersion: s3.aws.m.upbound.io/v1beta1
+kind: BucketPolicy
+metadata:
+  name: lab-bucket-policy
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    bucketRef:
+      name: lab-bucket
+    # Note the hardcoded bucket name and account ID. Neither can be a reference --
+    # this is an opaque string to Crossplane. If you rename the bucket you must
+    # edit this too, and nothing will warn you.
+    policy: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [{
+          "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+          "Effect": "Allow",
+          "Principal": {"Service": "cloudfront.amazonaws.com"},
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::crossplane-lab-022334369124-uw2/*",
+          "Condition": {
+            "StringEquals": {"AWS:SourceAccount": "022334369124"}
+          }
+        }]
+      }
+---
+apiVersion: s3.aws.m.upbound.io/v1beta1
+kind: Object
+metadata:
+  name: lab-index-html
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    bucketRef:
+      name: lab-bucket
+    key: index.html
+    contentType: text/html
+    content: |
+      <!doctype html>
+      <html><head><title>crossplane-lab</title></head>
+      <body style="font-family:system-ui;padding:3rem">
+        <h1>Served from S3 via CloudFront OAC</h1>
+        <p>Provisioned entirely by Crossplane managed resources.</p>
+      </body></html>
+---
+apiVersion: cloudfront.aws.m.upbound.io/v1beta1
+kind: Distribution
+metadata:
+  name: lab-distribution
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    enabled: true
+    # teardown.sh greps distributions by this exact comment.
+    comment: crossplane-lab
+    defaultRootObject: index.html
+    priceClass: PriceClass_100
+    origin:
+      - originId: s3-lab-bucket
+        # ANOTHER MISSING REFERENCE. There is no domainNameRef -- the bucket's
+        # regional domain name has to be assembled by hand from the bucket name.
+        # Safe only because we pinned the name via external-name above.
+        domainName: crossplane-lab-022334369124-uw2.s3.us-west-2.amazonaws.com
+        # This one IS referenceable.
+        originAccessControlIdRef:
+          name: lab-oac
+        s3OriginConfig:
+          originAccessIdentity: ""
+    defaultCacheBehavior:
+      targetOriginId: s3-lab-bucket
+      viewerProtocolPolicy: redirect-to-https
+      allowedMethods: [GET, HEAD]
+      cachedMethods: [GET, HEAD]
+      compress: true
+      # AWS managed "Managed-CachingOptimized", looked up via the CLI, not guessed.
+      cachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+    restrictions:
+      geoRestriction:
+        restrictionType: none
+    viewerCertificate:
+      # Default *.cloudfront.net cert -- no ACM, no custom domain.
+      cloudfrontDefaultCertificate: true
+    tags:
+      crossplane-lab: "true"

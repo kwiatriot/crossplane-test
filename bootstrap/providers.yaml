@@ -11,6 +11,10 @@ metadata:
   name: provider-aws-ec2
 spec:
   package: xpkg.upbound.io/upbound/provider-aws-ec2:v2.7.1
+  # Phase 3 only: enables --debug so drift reconciles are visible in the logs.
+  # Remove this stanza (and bootstrap/debug-runtimeconfig.yaml) to quiet it down.
+  runtimeConfigRef:
+    name: debug-logging
 ---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider

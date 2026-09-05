@@ -1,0 +1,21 @@
+# Provider pods log NOTHING at info level during a successful reconcile -- the
+# steady state is silent. To actually observe drift correction you have to turn on
+# debug logging, which means overriding the provider's Deployment via a
+# DeploymentRuntimeConfig and referencing it from the Provider.
+#
+# This is Phase 3 instrumentation, not part of the normal build. It is noisy; the
+# ec2 provider emits a line per resource per poll interval.
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: debug-logging
+spec:
+  deploymentTemplate:
+    spec:
+      selector: {}
+      template:
+        spec:
+          containers:
+            - name: package-runtime
+              args:
+                - --debug

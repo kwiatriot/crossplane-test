@@ -1,0 +1,107 @@
+# Phase 2 -- IAM role + instance profile for SSM, and the security group.
+#
+# TWO IDIOMS WORTH UNDERSTANDING HERE:
+#
+# 1. crossplane.io/external-name. IAM Role and InstanceProfile have NO `name`
+#    field in forProvider. The AWS-side name comes from the external-name
+#    annotation. If you omit it, Crossplane generates a random name and records
+#    it back into the annotation. We set it explicitly because the EC2 instance
+#    has to reference the profile BY STRING (see gotcha 2), so the name must be
+#    deterministic and known before the profile exists.
+#
+# 2. IAM is global -- these MRs have no `region` field at all, unlike every EC2
+#    resource. Same ProviderConfig, different shape.
+---
+apiVersion: iam.aws.m.upbound.io/v1beta1
+kind: Role
+metadata:
+  name: lab-ssm-role
+  namespace: aws-lab
+  annotations:
+    crossplane.io/external-name: crossplane-lab-ssm-role
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    assumeRolePolicy: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [{
+          "Effect": "Allow",
+          "Principal": {"Service": "ec2.amazonaws.com"},
+          "Action": "sts:AssumeRole"
+        }]
+      }
+    tags:
+      crossplane-lab: "true"
+---
+# Deliberately a separate MR rather than Role.forProvider.managedPolicyArns.
+# Those two mechanisms both manage attachments and will fight each other if you
+# use both -- Crossplane would keep reverting whichever it did not set.
+apiVersion: iam.aws.m.upbound.io/v1beta1
+kind: RolePolicyAttachment
+metadata:
+  name: lab-ssm-policy-attach
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    policyArn: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+    roleRef:
+      name: lab-ssm-role
+---
+apiVersion: iam.aws.m.upbound.io/v1beta1
+kind: InstanceProfile
+metadata:
+  name: lab-instance-profile
+  namespace: aws-lab
+  annotations:
+    # Must match the literal in 03-instance.yaml -- see the gotcha there.
+    crossplane.io/external-name: crossplane-lab-instance-profile
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    roleRef:
+      name: lab-ssm-role
+    tags:
+      crossplane-lab: "true"
+---
+# NO INBOUND RULES. Access is SSM Session Manager only, which works because the
+# agent makes OUTBOUND connections to the SSM service -- nothing ever connects
+# inbound to the instance.
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: SecurityGroup
+metadata:
+  name: lab-sg
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    name: crossplane-lab-sg
+    description: "Crossplane lab - no inbound, egress 443 only for SSM"
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-sg
+      crossplane-lab: "true"
+---
+# Egress IS required. This provider mirrors Terraform's behaviour: a SecurityGroup
+# created through the API has no default allow-all egress rule (unlike a SG created
+# in the console). Without this, the SSM agent cannot reach ssm/ec2messages and the
+# instance never registers -- it would look like a broken instance profile.
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: SecurityGroupEgressRule
+metadata:
+  name: lab-sg-egress-443
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    description: "HTTPS out for SSM agent"
+    ipProtocol: tcp
+    fromPort: 443
+    toPort: 443
+    cidrIpv4: 0.0.0.0/0
+    securityGroupIdRef:
+      name: lab-sg

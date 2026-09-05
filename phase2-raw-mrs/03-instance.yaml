@@ -1,0 +1,44 @@
+# Phase 2 -- the EC2 instance.
+#
+# GOTCHA: NO DATA SOURCES. Crossplane has no equivalent of `data "aws_ami"`. The
+# AMI must be a literal. This one was resolved out-of-band from the SSM public
+# parameter:
+#   aws ssm get-parameters --region us-west-2 \
+#     --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+#
+#   >>> AL2023 x86_64, us-west-2, published 2026-08-31 <<<
+#   >>> THIS GOES STALE. Amazon republishes roughly monthly. Re-run the command
+#   >>> above and update the literal; Crossplane will NOT tell you it is old, and
+#   >>> changing it REPLACES the instance.
+#
+# GOTCHA: iamInstanceProfile is a plain string with no Ref/Selector. Every other
+# link in this build is declarative (subnetIdRef, vpcSecurityGroupIdRefs), but
+# this one cannot be. The workaround is to pin the profile's name with
+# crossplane.io/external-name in 02-iam-sg.yaml and repeat the literal here.
+#
+# The cost: this edge is invisible to Crossplane. It will happily create the
+# instance before the profile exists, get an AWS error, and retry until it
+# succeeds. It converges, but the ordering is enforced by AWS rejecting the call
+# rather than by the dependency graph -- and if you typo the name, you get a
+# retry loop rather than a reference-resolution error naming the missing object.
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Instance
+metadata:
+  name: lab-instance
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    ami: ami-0bea529386a62a2ad          # <-- stale-prone literal, see above
+    instanceType: t3.micro
+    associatePublicIpAddress: true
+    subnetIdRef:
+      name: lab-public-a
+    vpcSecurityGroupIdRefs:
+      - name: lab-sg
+    iamInstanceProfile: crossplane-lab-instance-profile   # <-- must match external-name
+    tags:
+      Name: crossplane-lab-instance
+      crossplane-lab: "true"

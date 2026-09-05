@@ -1,0 +1,193 @@
+# Phase 2 -- VPC, subnets, IGW, route tables. Raw managed resources, no abstraction.
+#
+# Every MR here is namespaced (aws-lab) and uses the v2 `.m` API groups. Note that
+# spec.forProvider.region is REQUIRED on every single resource -- there is no
+# provider-level default region like OpenTofu's provider block. The ProviderConfig
+# carries credentials only, not region. This is a real ergonomic difference and a
+# large part of why Phase 4's Composition earns its keep.
+#
+# Dependency ordering is expressed with *Ref fields, not by apply order. You can
+# apply this whole file at once and Crossplane resolves the graph itself: subnets
+# block until the VPC has an ID, routes block until the IGW exists, etc. There is
+# no `depends_on` and no plan graph -- ordering is a runtime property.
+#
+# NO NAT GATEWAY. Private subnets have no default route out; that is deliberate
+# (cost). They exist to show a realistic two-tier layout, not to route traffic.
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: VPC
+metadata:
+  name: lab-vpc
+  namespace: aws-lab
+spec:
+  # kind is REQUIRED and defaults to ClusterProviderConfig. Omitting it silently
+  # points at a cluster-scoped object that does not exist in this setup.
+  providerConfigRef:
+    kind: ProviderConfig
+    name: default
+  forProvider:
+    region: us-west-2
+    cidrBlock: 10.42.0.0/16
+    enableDnsSupport: true
+    # Required for the SSM agent to resolve ssm/ec2messages endpoints.
+    enableDnsHostnames: true
+    tags:
+      Name: crossplane-lab-vpc
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: InternetGateway
+metadata:
+  name: lab-igw
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-igw
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Subnet
+metadata:
+  name: lab-public-a
+  namespace: aws-lab
+  labels:
+    tier: public
+    az: us-west-2a
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    availabilityZone: us-west-2a
+    cidrBlock: 10.42.0.0/24
+    mapPublicIpOnLaunch: true
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-public-a
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Subnet
+metadata:
+  name: lab-public-b
+  namespace: aws-lab
+  labels:
+    tier: public
+    az: us-west-2b
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    availabilityZone: us-west-2b
+    cidrBlock: 10.42.1.0/24
+    mapPublicIpOnLaunch: true
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-public-b
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Subnet
+metadata:
+  name: lab-private-a
+  namespace: aws-lab
+  labels:
+    tier: private
+    az: us-west-2a
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    availabilityZone: us-west-2a
+    cidrBlock: 10.42.10.0/24
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-private-a
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Subnet
+metadata:
+  name: lab-private-b
+  namespace: aws-lab
+  labels:
+    tier: private
+    az: us-west-2b
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    availabilityZone: us-west-2b
+    cidrBlock: 10.42.11.0/24
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-private-b
+      crossplane-lab: "true"
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: RouteTable
+metadata:
+  name: lab-public-rt
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    vpcIdRef:
+      name: lab-vpc
+    tags:
+      Name: crossplane-lab-public-rt
+      crossplane-lab: "true"
+---
+# Default route to the IGW. Blocks until BOTH the route table and the IGW have
+# external IDs -- the ref resolution is what enforces that, not apply ordering.
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: Route
+metadata:
+  name: lab-public-default-route
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    destinationCidrBlock: 0.0.0.0/0
+    routeTableIdRef:
+      name: lab-public-rt
+    gatewayIdRef:
+      name: lab-igw
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: RouteTableAssociation
+metadata:
+  name: lab-public-a-assoc
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    routeTableIdRef:
+      name: lab-public-rt
+    subnetIdRef:
+      name: lab-public-a
+---
+apiVersion: ec2.aws.m.upbound.io/v1beta1
+kind: RouteTableAssociation
+metadata:
+  name: lab-public-b-assoc
+  namespace: aws-lab
+spec:
+  providerConfigRef: {kind: ProviderConfig, name: default}
+  forProvider:
+    region: us-west-2
+    routeTableIdRef:
+      name: lab-public-rt
+    subnetIdRef:
+      name: lab-public-b
